@@ -1,0 +1,193 @@
+# ============================================
+# MYND Knowledge Paleontology - Docker Compose
+# Production-grade multi-container orchestration
+# ============================================
+
+version: '3.8'
+
+name: mynd-knowledge-paleontology
+
+services:
+  # ============================================
+  # Reverse Proxy
+  # ============================================
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - backend
+      - python-worker
+    restart: unless-stopped
+    networks:
+      - mynd-network
+
+  # ============================================
+  # Frontend (SvelteKit)
+  # ============================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    environment:
+      - NODE_ENV=production
+      - ORIGIN=http://localhost
+      - PUBLIC_API_URL=http://localhost/api/v1
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - mynd-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # ============================================
+  # Backend API (Fastify + TypeScript)
+  # ============================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      - NODE_ENV=production
+      - PORT=8000
+      - DATABASE_URL=postgresql://mynd:mynd_password@postgres:5432/mynd
+      - REDIS_URL=redis://redis:6379
+      - TIMESCALEDB_URL=postgresql://mynd:mynd_password@timescaledb:5432/mynd_ts
+      - CHROMA_URL=http://chromadb:8000
+      - JWT_SECRET=${JWT_SECRET:-change_this_in_production}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-change_this_in_production}
+      - CORS_ORIGINS=http://localhost,http://localhost:3000
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - mynd-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # ============================================
+  # Python Computation Worker (FastAPI)
+  # ============================================
+  python-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - CHROMA_URL=http://chromadb:8000
+    depends_on:
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - mynd-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # ============================================
+  # PostgreSQL - Main Database
+  # ============================================
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=mynd
+      - POSTGRES_PASSWORD=mynd_password
+      - POSTGRES_DB=mynd
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    networks:
+      - mynd-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mynd -d mynd"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # TimescaleDB - Time Series Data
+  # ============================================
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      - POSTGRES_USER=mynd
+      - POSTGRES_PASSWORD=mynd_password
+      - POSTGRES_DB=mynd_ts
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - mynd-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mynd -d mynd_ts"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # Redis - Cache & Message Queue
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - mynd-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ============================================
+  # ChromaDB - Vector Database
+  # ============================================
+  chromadb:
+    image: chromadb/chroma:latest
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=False
+    volumes:
+      - chroma_data:/chroma/chroma
+    restart: unless-stopped
+    networks:
+      - mynd-network
+
+volumes:
+  postgres_data:
+  timescaledb_data:
+  redis_data:
+  chroma_data:
+
+networks:
+  mynd-network:
+    driver: bridge

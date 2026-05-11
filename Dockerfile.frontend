@@ -1,0 +1,45 @@
+# ============================================
+# MYND Knowledge Paleontology - Frontend Dockerfile
+# Multi-stage build for SvelteKit production
+# ============================================
+
+# Stage 1: Build dependencies
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+# Copy package files
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --frozen-lockfile
+
+# Stage 2: Build the application
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY frontend/ .
+
+# Build the SvelteKit application
+RUN npm run build
+
+# Stage 3: Production image
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOST=0.0.0.0
+
+# Create non-root user
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 sveltekit
+
+# Copy built application
+COPY --from=builder --chown=sveltekit:nodejs /app/build ./build
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+
+USER sveltekit
+
+EXPOSE 3000
+
+CMD ["node", "build"]
